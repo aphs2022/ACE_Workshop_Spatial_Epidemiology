@@ -1,0 +1,750 @@
+---
+title: "ACE Conference Presentation"
+output:
+  pdf_document: default
+  html_document: default
+---
+Here are the needed libraries for this tutorial
+
+```{r setup, include=FALSE}
+#install.packages('tidyverse')
+#install.packages('devtools')
+#install.packages("usmap")
+#install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+
+library(sf)
+library(raster)
+library(dplyr)
+library(spData)
+#Note that you will have to install spDataLarge after installing spData
+#install.packages('spDataLarge', repos='https://nowosad.github.io/drat/', type='source')
+library(spDataLarge)
+library(spdep)
+library(tidyverse)
+library(usmap)
+library(ggplot2)
+library(RColorBrewer)
+library(INLA)
+library(rgdal)
+library(sp)
+library(tableone)
+library("MASS")
+library("BayesLogit")
+library("FRK")
+library("fields")
+library("mpath")
+library("SemiPar")
+library("data.table")
+library("stringr")
+library("car")
+library("readxl")
+
+```
+
+## Research Question and Data file
+
+Research Question: What are the sociodemographic factors associated with West Nile virus rates in Pennsylvania?
+
+Let's load the data:
+
+```{r cars}
+#change setwd to the folder the downloaded files are located
+setwd("C:/Users/rpaul9/Dropbox (UNC Charlotte)/ACE_Workshop/ACE_Workshop_Spatial")
+
+#load the West Nile Virus data
+case.data = read.csv("PA.WN.covariates.csv", header = T)
+
+head(case.data)
+
+
+```
+
+#Calculate Expected Counts: Offset Variable
+#(Total cases/Total Population) * County Population
+```{r}
+#generating the expected counts
+case.data$EC = sum(case.data$TotalCases)/sum(case.data$tot_pop)*case.data$tot_pop
+```
+
+## Desriptive Statistics
+
+#First Task: Let's visualize the distribution of cases of West Nile virus: "TotalCases"
+
+```{r pressure, echo=FALSE}
+
+hist(case.data$TotalCases)
+
+table(case.data$TotalCases, useNA = "always")
+
+```
+
+Let's check these distribution on a choropleth
+
+First, let's check a simple choropleth showing the states and counties in the US
+
+```{r}
+plot_usmap(regions = "states") + 
+  labs(title = "U.S. States",
+       subtitle = "Map of US States.") + 
+  theme(panel.background=element_blank())
+
+
+plot_usmap(regions = "counties") + 
+  labs(title = "U.S. counties",
+       subtitle = "Map of US Counties") + 
+  theme(panel.background=element_blank())
+```
+
+
+Our data is focused on Pennsylvania. Let's select PA data (using "include" syntax) at the county level
+
+```{r}
+plot_usmap(regions = "counties", include = c("PA")) +
+  labs(title = "Pennsylvania") +
+  theme(panel.background = element_rect(color = "black"))
+```
+
+Let's add the West Nile virus counts to the map
+
+```{r}
+#Quick Check: the identifier is "fips" NOT "FIPS" - case sensitive
+
+#Let's plot
+
+plot_usmap(data = case.data, values = "TotalCases", include = "PA", color = "blue") + 
+  scale_fill_continuous(low = "white", high = "blue", name = "Cases", label = scales::comma) + 
+  labs(title = "West Nile Virus Cases in Pennysylvania", subtitle = "Cases per County for PA counties") +
+  theme(legend.position = "right")
+
+
+```
+We can generate categories to better visualize the distribution
+
+We can create "casecat" and have 4 categories
+0 count, 1 count, 2-5 counts, 6 or more counts
+
+
+```{r}
+table(case.data$TotalCases)
+
+
+case.data$casecat = ifelse(case.data$TotalCases==0,0,
+                           ifelse(case.data$TotalCases==1, 1,
+                                  ifelse(case.data$TotalCases>=2 & case.data$TotalCases<=5,2,
+                                         ifelse(case.data$TotalCases>5, 3, NA))))
+
+
+case.data$casecat <- ordered(case.data$casecat,
+                             levels = c(0,1,2,3),
+                             labels = c("0", "1", "2-5",">5"))
+
+table(case.data$casecat)
+```
+
+Let's map these fatal West Nile Virus categories
+we change continous syntax to discrete syntax in ggplot2
+A good quick resource: www.ggplot2tutor.com/scales/scale_fill_discrete
+
+```{r}
+#without a theme 
+plot_usmap(include = "PA", data = case.data, values = "casecat") + 
+  scale_fill_discrete(name = "West Nile Virus Counts", h= c(0,360) + 15, c=100, l=65, h.start =0, direction=1, na.value="grey50", aesthetics ="fill") +
+  labs(title = "West Nile Virsu Counts in Pennsylvania", subtitle = "West Nile Virus in PA")
+
+#with a theme
+
+plot_usmap(include = "PA", data = case.data, values = "casecat") + 
+  scale_fill_discrete(name = "West Nile Virus Counts", h= c(0,360) + 15, c=100, l=65, h.start =0, direction=1, na.value="grey50", aesthetics ="fill") +
+  labs(title = "West Nile Virus Counts in Pennsylvania", subtitle = "West Nile Virus in PA") + 
+  theme(panel.background = element_rect(colour = "black", fill = "light blue")) + theme(legend.position = "right")
+
+
+
+```
+
+
+# West Nile Virus Rates
+
+Case counts are not very informative. Let's have some standardized measures like Crude Rates per 100,000 population
+
+```{r}
+
+case.data$caserate = round(case.data$TotalCases/case.data$tot_pop*100000, 0)
+
+hist(case.data$caserate)
+
+table(case.data$caserate, useNA = "always")
+
+```
+
+
+```{r}
+
+
+ruralcases <- case.data$TotalCases[case.data$ruca2gp == "Low comuting micropolitan, Rural and Small towns"]
+urbancases <- case.data$TotalCases[case.data$ruca2gp == "Metropolitan/Urban"]
+
+
+num_breaks_rural <- 5  # Number of bins for rural
+num_breaks_urban <- 10  # Number of bins for urban
+
+
+hist(ruralcases, breaks = num_breaks_rural, col = "blue", main = "Histogram for West Nile Virus in Rural Areas", xlab = "Counts")
+
+
+hist(urbancases, breaks = num_breaks_urban, col = "red", main = "Histogram for West Nile Virus in Urban Areas", xlab = "Counts")
+
+
+
+
+#what if we want to keep the x-axis of the same length
+# data_range <- range(c(ruralcases, urbancases))
+# num_breaks <- 5
+# 
+# #Now the histogram
+# 
+# hist(ruralcases, breaks = seq(data_range[1], data_range[2], length.out = num_breaks + 1),  xlim = data_range, col = "blue", main = "Histogram for West Nile Virus in Rural Areas", xlab = "Counts")
+# 
+# 
+# hist(urbancases, breaks = seq(data_range[1], data_range[2], length.out = num_breaks + 1),  xlim = data_range, col = "red", main = "Histogram for West Nile Virus in Urban Areas", xlab = "Counts")
+
+```
+
+
+
+Let's generate categories and visualize the categories
+
+```{r}
+table(case.data$caserate)
+
+
+case.data$ratecat = ifelse(case.data$caserate==0,0,
+                          ifelse(case.data$caserate==1,1,
+                           ifelse(case.data$caserate==2,2,
+                                  ifelse(case.data$caserate>=2,3,NA))))
+
+
+case.data$ratecat <- ordered(case.data$ratecat,
+                             levels = c(0,1,2,3),
+                             labels = c("0", "1", "2", "3 or more"))
+
+table(case.data$ratecat)
+
+#replace scale_fill_discrete with scale_colour_grey
+plot_usmap(include = "PA", data = case.data, values = "ratecat") + scale_colour_grey(start=0.7, end= 0) + labs(title = "West Nile Virus Counts in Pennsylvania", subtitle = "West Nile Virus in PA") + theme(panel.background = element_rect(colour = "black", fill = "light blue")) + theme(legend.position = "right")
+
+
+
+```
+
+#Visualizing the Standardized Mortality Rate
+```{r}
+#calculating the Standardized rate ratio (from SMR): Observed/expected
+case.data$smr = round(case.data$TotalCases/case.data$EC,2)
+
+hist(case.data$smr)
+
+plot_usmap(data = case.data, values = "smr", include = "PA", color = "blue") + 
+  scale_fill_continuous(low = "white", high = "blue", name = "SMR", label = scales::comma) + 
+  labs(title = "Standardized Rate Ratio", subtitle = "RR for Pennysylvania Counties") +
+  theme(legend.position = "right")
+
+table(case.data$smr)
+
+case.data$smrcat = ifelse(case.data$smr<=0.50,0,
+                         ifelse(case.data$smr>=0.51 & case.data$smr<1.00,1,
+                                ifelse(case.data$smr>=1.00 & case.data$smr<2.00,2,
+                                       ifelse(case.data$smr>=2.00,3, NA))))
+
+
+case.data$smrcat <- ordered(case.data$smrcat,
+                           levels = c(0,1,2,3),
+                           labels = c("0-0.50", "0.51-0.99", "1.00-1.99", ">=2.00"))
+
+plot_usmap(include = "PA", data = case.data, values = "smrcat") + 
+  scale_fill_discrete(name = "SMR", h= c(0,360) + 15, c=100, l=65, h.start =0, direction=1, na.value="grey50", aesthetics ="fill") +
+  labs(title = "West Nile Virus Ratio in Pennyslyvania", subtitle = "Standardized Rate Ratio") + 
+  theme(panel.background = element_rect(colour = "black", fill = "light blue")) + theme(legend.position = "right")
+
+
+```
+#Predictor Variables
+Let's address the research question by listing some county demographic and health characteristics as predictors
+1. Rurality/Urbanicity: Binary variable - Rural/Urban
+4. Poverty Rates: Poverty
+5. Percent of population having less than high school education
+6. Computing expected death counts as an offset variable
+
+```{r}
+
+### Create a rural/urban variable using RUCA Codes ###
+Metropolitan <- as.numeric(case.data$ruca3gp == "Metropolitan")
+## How many Metropolitan Counties? ## 
+table(Metropolitan)
+## Add this variable to case.data ###
+case.data$Metropolitan <- Metropolitan
+
+## Prepare for INLA-R Runs ###
+tab1 <- CreateTableOne (vars = c ("Metropolitan", "lesshighschool",
+                                  "Poverty", "EC"),
+                        data = case.data)
+print(tab1, showAllLevels = TRUE)
+summary(tab1)
+
+
+```
+#Regression Analysis with Negative Binomial 
+
+We run the regression analysis with INLA
+First, we will specify the formula
+Then insert it into the INLA syntax
+More information and tutorials on INLA: https://www.r-inla.org/examples-tutorials
+
+INLA: 
+computationally efficient - fast alternative to MCMC
+uses the Stochastic Partial Differentiation Equation (SPDE) to estimate spatial autocorrelation of the data
+
+```{r}
+#setting priors
+#https://becarioprecario.bitbucket.io/inla-gitbook/ch-priors.html
+
+prior.fixed1 <- list(mean.intercept = 0, prec.intercept = 0.0001,
+                    mean = c(0, 0, 0), prec = c(0.0001, 0.0001, 0.0001))
+prec.prior1 <- list(prec = list(param = c(0.001, 0.001)))
+
+
+formula1 <- TotalCases ~ Metropolitan + lesshighschool + Poverty
+
+dat.inla <- inla(formula1, family='nbinomial', E=EC,
+                 data=case.data,
+                 control.family=list(link='log'),
+                 control.fixed = prior.fixed1,
+                 control.predictor=list(link=1, compute=TRUE),
+                 control.compute=list(dic=TRUE, cpo=TRUE, waic=TRUE))
+
+## Summary Statistics ##
+results.inla <- summary(dat.inla)
+## Getting Estimated Coefficients ##
+regression.coefficients <- results.inla$fixed
+## Calculating IRR ##
+Table1 <- regression.coefficients[, c(1,3:5)]## Retain only columns 1, 3 to 5
+IRR.Table1 <- exp(Table1)
+View(IRR.Table1)
+## Rounding to Two Decimal Places ##
+View(round(IRR.Table1, 2))
+## Save as .csv file ##
+write.csv(round(IRR.Table1, 2), file = "nonspatial.NB.csv")
+### Obtaining Watanabe–Akaike Information Criterion ###
+results.inla$waic$waic
+
+```
+
+
+
+What is the Summary Here?
+
+Can we generate the Rate Ratios?
+```{r}
+#Older Adults
+YearsRatio <- exp(-0.135)
+LCI <- exp(-0.254)
+UCI <- exp(-0.020)
+
+YearsRatio
+LCI
+UCI
+
+```
+Every unit increase in Older adult population in a county is associated with a 23% reduction in the rate of West Nile virus in a county (95% Credible Interval: 0.78 - 0.98)
+
+
+
+
+#Spatial Regression
+1. Read the shape file
+```{r}
+pa.tr <- readOGR("PaCounty2023_08.shp")
+```
+
+2. Create adjacency matrix
+```{r}
+pa.adj <- poly2nb(pa.tr)
+```
+
+
+3. Non-standardized and Row standardized matrices
+```{r}
+W.pa <- nb2mat(pa.adj, style = "B") 
+W.pa.rs <- nb2mat(pa.adj, style = "W") 
+
+#wt2 = read.gal("3102counties_wt.gal",override.id = TRUE)
+#wt2.listw = nb2listw(wt2, style = "W", zero.policy = TRUE)
+#class(wt2.listw)
+```
+
+
+```{r}
+#Will the model improved by adding spatial estimators?
+#AIC
+#BIC
+#DIc
+#Moran's I
+
+
+nonspatialmodel = glm.nb(TotalCases ~ years65 + Male + Blackpct + Poverty + ruca2gp, data = case.data)
+
+nonspatialmodel
+
+wt2.listw <- nb2listw(pa.adj, style = "W", zero.policy = TRUE)
+
+class(wt2.listw)
+
+moran.test(residuals.glm(nonspatialmodel),wt2.listw)
+
+```
+
+
+
+4. Merge the variables in the case.data with the spatial data
+
+```{r}
+
+#First, let's create a 5-digit fips variable
+
+pa.tr@data$stcode = "42"
+
+pa.tr@data$fips = paste0(pa.tr@data$stcode,pa.tr@data$FIPS_COUNT)
+
+#Next: let's merge by fips
+
+pa.tr@data= merge(pa.tr@data, case.data, by = 'fips')
+
+```
+
+
+
+5. Create the model
+
+```{r}
+
+pa.tr@data$ID <- 1:nrow((pa.tr@data))
+
+pa.formula <- TotalCases ~ Metropolitan + lesshighschool + Poverty + f(ID, model = "bym", graph = W.pa.rs)
+
+
+
+#BYM = besag+iid; try out besag, besagproper, bym2 and check the WAIC and DIC
+#more information on the sensitivity of the models: https://becarioprecario.bitbucket.io/inla-gitbook/ch-spatial.html 
+
+```
+
+5. INLA model
+
+```{r}
+
+pa.bym <- inla(pa.formula,
+                      family='nbinomial',E=EC,  
+               data = as.data.frame(pa.tr@data),
+               control.family=list(link='log'),
+               control.fixed = prior.fixed1,
+               control.compute = list (dic = TRUE, waic = TRUE, cpo = TRUE, return.marginals.predictor=TRUE),
+               control.predictor = list(link=1, compute = TRUE)
+)
+
+
+summary(pa.bym)
+## Summary Statistics ##
+results.inla.bym <- summary(pa.bym)
+## Getting Estimated Coefficients ##
+regression.coefficients.bym <- results.inla.bym$fixed
+## Calculating IRR ##
+Table1.bym <- regression.coefficients.bym[, c(1,3:5)]## Retain only columns 1, 3 to 5
+IRR.Table1.bym <- exp(Table1.bym)
+View(IRR.Table1.bym)
+## Rounding to Two Decimal Places ##
+View(round(IRR.Table1.bym, 2))
+## Save as .csv file ##
+write.csv(round(IRR.Table1.bym, 2), file = "spatial.NB.csv")
+### Obtaining Watanabe–Akaike Information Criterion ###
+results.inla.bym$waic$waic
+
+
+```
+Let's interpret the results
+```{r}
+#Older Adults
+Sp_OlderAdult_RateRatio <- exp(-0.134)
+Sp_LCI <- exp(-0.255)
+Sp_UCI <- exp(-0.017)
+
+Sp_OlderAdult_RateRatio
+Sp_LCI
+Sp_UCI
+
+```
+A unit increase in the proportion of older adults in PA counties is associated with a 23% reduction in the West Nile virus rates. 
+(95% Credible Interval: 0.77 - 0.98)
+
+Non-Spatial Model:    WAIC:222.50    DIC:219.20
+Spatial Model:        WAIC:220.64    DIC:218.45
+
+
+#6. Adjusted fatal counts
+
+```{r}
+#https://www.paulamoraga.com/book-geospatial/sec-inla.html
+#summary.fitted.values: obtained by transforming the linear predictors by the inverse of the link function
+
+head(pa.bym$summary.fitted.values)
+
+pa.tr@data$AdjCounts <- pa.bym$summary.fitted.values[, "mean"]
+pa.tr$LL <- pa.bym$summary.fitted.values[, "0.025quant"]
+pa.tr$UL <- pa.bym$summary.fitted.values[, "0.975quant"]
+
+
+```
+
+
+#8. Mapping Exceedance Probability and Adjusted Rates
+
+ We have adjusted estimates. Lets visualize the results.
+First, let's convert back to simple features (sf)
+Next, we plot.
+
+
+```{r}
+pa.tr_sf <- st_as_sf(pa.tr)
+
+hist(pa.tr_sf$AdjCounts)
+table(pa.tr_sf$AdjCounts)
+mean(pa.tr_sf$AdjCounts)
+
+ggplot(pa.tr_sf) + geom_sf(aes(fill = AdjCounts)) +
+  scale_fill_gradient2(
+    midpoint = 0.7, low = "blue", mid = "white", high = "red",
+    limits= c(0,2)  ) +
+  theme_bw()
+
+
+```
+
+```{r}
+pa.tr$exc1 <- sapply(pa.bym$marginals.fitted.values, FUN = function(marg){1 - inla.pmarginal(q = 1.0, marginal = marg)})
+
+```
+
+
+
+
+```{r}
+
+#mapping Exceedance probability
+
+#https://www.paulamoraga.com/book-geospatial/sec-inla.html
+#marginals.fitted.values: posterior marginals of the fitted values obtained by transforming the linear predictors by the inverse of the link function.
+
+
+head(pa.bym$summary.fitted.values)
+
+pa.tr$AdjCounts <- pa.bym$summary.fitted.values[, "mean"]
+pa.tr$LL <- pa.bym$summary.fitted.values[, "0.025quant"]
+pa.tr$UL <- pa.bym$summary.fitted.values[, "0.975quant"]
+
+summary(pa.tr[, c("AdjCounts", "LL", "UL", "exc1")])
+
+pa.tr_sf$exc1 = pa.tr$exc1
+pa.tr_sf$exc2 = round(pa.tr_sf$exc1,2)
+table(pa.tr_sf$exc2)
+
+pa.tr_sf$Exceedance = ifelse(pa.tr_sf$exc1<=0.5,0,
+                          ifelse(pa.tr_sf$exc1>0.5,1,NA))
+
+
+pa.tr_sf$Exceedance <- ordered(pa.tr_sf$Exceedance,
+                             levels = c(0,1),
+                             labels = c("Less than 50%", "More than 50%"))
+
+table(pa.tr_sf$Exceedance)
+
+plot_usmap(include = "PA", data = pa.tr_sf, values = "Exceedance") + 
+  scale_fill_discrete(name = "Exceedance Probability", h= c(0,360) + 5, c=100, l=65, h.start =60, direction=1, na.value="grey50", aesthetics ="fill") +  labs(title = "Exceedance Probability: Counties with Rate Ratios Above 1%") + 
+  theme(panel.background = element_rect(colour = "black", fill = "light grey")) + theme(legend.position = "right")
+
+
+```
+
+#Spatiotemporal Model
+
+```{r}
+#let's read the data
+
+covid.data = read.csv("dataCovid_PA.csv", header = T)
+
+head(covid.data)
+
+```
+
+
+```{r}
+april.data = subset(covid.data, select = c(dApr30, Black_Percent, Population, years65, Poverty, somecollegeassociate, Obesity, Metropolitan, fips))
+april.data$timeID = 1
+april.data$rate <- sum(april.data$dApr30)/sum(april.data$Population)
+april.data$EC <- april.data$rate*april.data$Population
+names(april.data)[1] <- "count"
+april.data$SMR = april.data$count/april.data$EC
+
+
+may.data = subset(covid.data, select = c(dMay31, Black_Percent, Population, years65, Poverty, somecollegeassociate, Obesity, Metropolitan, fips))
+may.data$timeID = 2
+may.data$rate <- sum(may.data$dMay31)/sum(may.data$Population)
+may.data$EC <- may.data$rate*may.data$Population
+names(may.data)[1] <- "count"
+may.data$SMR = may.data$count/may.data$EC
+
+june.data = subset(covid.data, select = c(dJun30, Black_Percent, Population, years65, Poverty, somecollegeassociate, Obesity, Metropolitan, fips))
+june.data$timeID = 3
+june.data$rate <- sum(june.data$dJun30)/sum(june.data$Population)
+june.data$EC <- june.data$rate*june.data$Population
+names(june.data)[1] <- "count"
+june.data$SMR = june.data$count/june.data$EC
+
+
+july.data = subset(covid.data, select = c(dJul31, Black_Percent, Population, years65, Poverty, somecollegeassociate, Obesity, Metropolitan, fips))
+july.data$timeID = 4
+july.data$rate <- sum(july.data$dJul31)/sum(july.data$Population)
+july.data$EC <- july.data$rate*july.data$Population
+names(july.data)[1] <- "count"
+july.data$SMR = july.data$count/july.data$EC
+
+
+august.data = subset(covid.data, select = c(dAug31, Black_Percent, Population, years65, Poverty, somecollegeassociate, Obesity, Metropolitan, fips))
+august.data$timeID = 5
+august.data$rate <- sum(august.data$dAug31)/sum(august.data$Population)
+august.data$EC <- august.data$rate*august.data$Population
+names(august.data)[1] <- "count"
+august.data$SMR = august.data$count/august.data$EC
+
+
+```
+
+```{r}
+table(august.data$SMR)
+mean(august.data$SMR)
+```
+```{r}
+covid.tr = st_as_sf(pa.tr)
+
+aprilcovid= merge(covid.tr, april.data, by = 'fips')
+
+maycovid= merge(covid.tr, may.data, by = 'fips')
+
+junecovid= merge(covid.tr, june.data, by = 'fips')
+
+julycovid= merge(covid.tr, july.data, by = 'fips')
+
+augustcovid= merge(covid.tr, august.data, by = 'fips')
+```
+
+
+```{r}
+#April 
+ggplot(aprilcovid) + geom_sf(aes(fill = SMR)) +
+  scale_fill_gradient2(
+    midpoint = 0.5, low = "blue", mid = "white", high = "red",
+    limits= c(0,2)  ) +
+  theme_bw()
+
+#May 
+ggplot(maycovid) + geom_sf(aes(fill = SMR)) +
+  scale_fill_gradient2(
+    midpoint = 0.5, low = "blue", mid = "white", high = "red",
+    limits= c(0,2)  ) +
+  theme_bw()
+
+#June 
+ggplot(junecovid) + geom_sf(aes(fill = SMR)) +
+  scale_fill_gradient2(
+    midpoint = 0.5, low = "blue", mid = "white", high = "red",
+    limits= c(0,2)  ) +
+  theme_bw()
+
+#July 
+ggplot(julycovid) + geom_sf(aes(fill = SMR)) +
+  scale_fill_gradient2(
+    midpoint = 0.5, low = "blue", mid = "white", high = "red",
+    limits= c(0,2)  ) +
+  theme_bw()
+
+#August 
+ggplot(augustcovid) + geom_sf(aes(fill = SMR)) +
+  scale_fill_gradient2(
+    midpoint = 0.5, low = "blue", mid = "white", high = "red",
+    limits= c(0,2)  ) +
+  theme_bw()
+```
+
+
+
+
+
+```{r}
+
+count <- as.vector(c(april.data$count, may.data$count, june.data$count, july.data$count, august.data$count))
+
+black <- as.vector(c(april.data$Black_Percent, may.data$Black_Percent, june.data$Black_Percent, july.data$Black_Percent, august.data$Black_Percent))
+
+population <- as.vector(c(april.data$Population, may.data$Population, june.data$Population, july.data$Population, august.data$Population))
+
+years65 <- as.vector(c(april.data$years65, may.data$years65, june.data$years65, july.data$years65, august.data$years65))
+
+poverty <- as.vector(c(april.data$Poverty, may.data$Poverty, june.data$Poverty, july.data$Poverty, august.data$Poverty))
+
+college <- as.vector(c(april.data$somecollegeassociate, may.data$somecollegeassociate, june.data$somecollegeassociate, july.data$somecollegeassociate, august.data$somecollegeassociate))
+
+obesity <- as.vector(c(april.data$Obesity, may.data$Obesity, june.data$Obesity, july.data$Obesity, august.data$Obesity))
+
+metro <- as.vector(c(april.data$Metropolitan, may.data$Metropolitan, june.data$Metropolitan, july.data$Metropolitan, august.data$Metropolitan))
+
+fips <- as.vector(c(april.data$fips, may.data$fips, june.data$fips, july.data$fips, august.data$fips))
+
+timeID <- as.vector(c(april.data$timeID, may.data$timeID, june.data$timeID, july.data$timeID, august.data$timeID))
+
+
+smr <- as.vector(c(april.data$SMR, may.data$SMR, june.data$SMR, july.data$SMR, august.data$SMR))
+
+ec <- as.vector(c(april.data$EC, may.data$EC, june.data$EC, july.data$EC, august.data$EC))
+
+data.all <- data.frame(count, black, population, years65, poverty, college, obesity, metro, fips, timeID, smr, ec)
+
+
+
+```
+
+
+```{r}
+stformula <- count~ years65 + black + poverty + obesity + metro + f(fips, timeID, model = "iid")
+
+
+nu <- 1:length(count)
+
+prior.fixed <- list(mean.intercept = 0, prec.intercept = 0.0001,
+                    mean = 0, prec = 0.0001)
+prec.prior <- list(prec = list(param = c(0.001, 0.001)))
+
+Wmat <- W.pa.rs
+
+
+```
+
+
+```{r}
+model<-inla(stformula,data = data.all, 
+             family = "nbinomial", E = ec, #marginal distribution for the outcome, expected count
+             control.fixed = prior.fixed,
+             control.compute = list(waic=T, return.marginals.predictor=TRUE), # compute DIC or not?
+             control.predictor = list(link=1, compute=TRUE)) #estimate predicted values & their marginals or not?
+View(exp(model$summary.fixed))
+```
+
+
+
